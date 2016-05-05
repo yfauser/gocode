@@ -220,8 +220,9 @@ func netteardown(ns string, podname string, containerid string) {
 }
 
 func main() {
-	file := openlog("/tmp/plugin.log")
-	multi := io.MultiWriter(file, os.Stdout)
+	logfile := openlog("/tmp/plugin.log")
+	defer logfile.Close()
+	multi := io.MultiWriter(logfile, os.Stdout)
 	Info = log.New(multi, "INFO: ", log.Ldate|log.Ltime|log.Lshortfile)
 	Error = log.New(multi, "ERROR: ", log.Ldate|log.Ltime|log.Lshortfile)
 
