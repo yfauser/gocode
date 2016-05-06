@@ -3,6 +3,7 @@ package main
 import (
 	"io"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"strconv"
@@ -118,12 +119,28 @@ func getmappeduplink(vethid int) int {
 	return 0
 }
 
+func getuplinkmac(uplinkname string) (interf_mac string) {
+	interf, _ := net.InterfaceByName(uplinkname)
+	interf_mac = interf.HardwareAddr.String()
+	return interf_mac
+}
+
+func getpoddetails(netContainerId string) (nsid string, ipaddr string, gateway string, mac string) {
+	dinspect := cmdexecutor(exec.Command("docker", "inspect", "--format",
+		"{{.State.Pid}},{{.NetworkSettings.IPAddress}},{{.NetworkSettings.IPPrefixLen}},{{.NetworkSettings.Gateway}},{{.NetworkSettings.MacAddress}}",
+		netContainerId), false)
+	sdinspect := strings.Split(dinspect, ",")
+	nsid = sdinspect[0][:len(sdinspect[0])]
+	ipaddr = sdinspect[1][:len(sdinspect[1])] + "/" + sdinspect[2][:len(sdinspect[2])]
+	gateway = sdinspect[3][:len(sdinspect[3])]
+	mac = sdinspect[4][:len(sdinspect[4])-1]
+	return nsid, ipaddr, gateway, mac
+}
+
 func getvethHost(netContainerId string) string {
-	// get the PID of the net container
-	cpidret := cmdexecutor(exec.Command("docker", "inspect", "--format", "{{.State.Pid}}", netContainerId), true)
-	cpid := cpidret[:len(cpidret)-1]
 	// get veth pair with nsenter from container namespace
-	linkshowns := cmdexecutor(exec.Command("nsenter", "--target", cpid, "--net", "ip", "link", "show", "eth0"), false)
+	nsid, _, _, _ := getpoddetails(netContainerId)
+	linkshowns := cmdexecutor(exec.Command("nsenter", "--target", nsid, "--net", "ip", "link", "show", "eth0"), false)
 	ethpair := strings.Split(linkshowns, " ")[1]
 	searched := strings.Split(ethpair, "@")[1][2:]
 	// get ip link list in main namespace
@@ -154,14 +171,26 @@ func removsport(vethHost string) {
 	cmdexecutor(exec.Command("ovs-vsctl", "del-port", "br0", vethHost), true)
 }
 
-func createflows(vethid int, uplinkid int) {
+func createflows(vethid int, vethmac string, uplinkid int, uplinkmac string) {
 	Info.Printf("Add flows for POD in OpenFlow Table\n")
 	// add flow from POD to uplink in Table 2
 	cmdexecutor(exec.Command("ovs-ofctl", "add-flow", "br0",
-		"table=2, priority=100, in_port="+strconv.Itoa(vethid)+" , actions=output:"+strconv.Itoa(uplinkid)), true)
+		"table=2, priority=100, in_port="+strconv.Itoa(vethid)+
+			", actions=mod_dl_src:"+uplinkmac+",output:"+strconv.Itoa(uplinkid)), true)
+	cmdexecutor(exec.Command("ovs-ofctl", "add-flow", "br0",
+		"table=2, priority=150, ip, arp, in_port="+strconv.Itoa(vethid)+
+			", actions=mod_dl_src:"+uplinkmac+", set_field:"+uplinkmac+"->arp_sha, output:"+strconv.Itoa(uplinkid)), true)
 	// add flow from uplink to POD in Table 3
 	cmdexecutor(exec.Command("ovs-ofctl", "add-flow", "br0",
-		"table=3, priority=100, in_port="+strconv.Itoa(uplinkid)+" , actions=output:"+strconv.Itoa(vethid)), true)
+		"table=3, priority=100, in_port="+strconv.Itoa(uplinkid)+
+			", actions=mod_dl_dst:"+vethmac+",output:"+strconv.Itoa(vethid)), true)
+	cmdexecutor(exec.Command("ovs-ofctl", "add-flow", "br0",
+		"table=3, priority=150, ip, arp, in_port="+strconv.Itoa(uplinkid)+
+			", actions=mod_dl_dst:"+vethmac+", set_field:"+vethmac+"->arp_tha, output:"+strconv.Itoa(vethid)), true)
+
+	//ovs-ofctl add-flow br0 "table=2, priority=100, in_port=11 , ip, arp,actions=mod_dl_src:00:50:56:8a:2b:96,set_field:00:50:56:8a:2b:96->arp_sha,output:2"
+
+	//ovs-ofctl add-flow br0 "table=3, priority=100, in_port=2 , ip, arp, actions=mod_dl_dst:02:42:c0:a8:6a:04, set_field:02:42:c0:a8:6a:04->arp_tha ,output:11"
 
 }
 
@@ -204,9 +233,12 @@ func netsetup(ns string, podname string, containerid string) {
 	defer lockfile.Close()
 	fd := lockfile.Fd()
 	aquirelock(int(fd))
+	_, _, _, pmac := getpoddetails(containerid)
 	vethifindex := getvethifindex(vethif)
 	uplinkid := getfreeuplink()
-	createflows(vethifindex, uplinkid)
+	uplinkname := "eth" + strconv.Itoa(uplinkid)
+	uplinkmac := getuplinkmac(uplinkname)
+	createflows(vethifindex, pmac, uplinkid, uplinkmac)
 	releaselock(int(fd))
 }
 
