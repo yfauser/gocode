@@ -190,8 +190,7 @@ func createflows(vethid int, vethmac string, uplinkid int, uplinkmac string) {
 
 	//ovs-ofctl add-flow br0 "table=2, priority=100, in_port=11 , ip, arp,actions=mod_dl_src:00:50:56:8a:2b:96,set_field:00:50:56:8a:2b:96->arp_sha,output:2"
 
-	//ovs-ofctl add-flow br0 "table=3, priority=100, in_port=2 , ip, arp, actions=mod_dl_dst:02:42:c0:a8:6a:04, set_field:02:42:c0:a8:6a:04->arp_tha ,output:11"
-
+	//ovs-ofctl add-flow br0 "table=3, priority=100, in_port=2 , ip, arp, actions=mod_dl_dst:02:42:c0:a8:6a:04, set_field:02:42:c0:a8:6a:04->arp_tha ,output:11"ß
 }
 
 func deleteflows(vethid int, uplinkid int) {

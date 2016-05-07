@@ -85,39 +85,50 @@ func cmdexecutor(cmd *exec.Cmd, quite bool) string {
 	return string(output)
 }
 
-func constructCtEntries(service K8ssvc) (ct string) {
+func constructCtEntries(service K8ssvc, subset api.EndpointSubset) (ct string) {
 	var entry string = ""
 	CtPrefix := "group_id=" + strconv.Itoa(service.OvsGroup) + ",type=select,"
-	if len(service.Endpoints) == 0 {
+	if len(subset.Addresses) == 0 {
 		ct = CtPrefix
 		return ct
 	}
-	for _, endpoint := range service.Endpoints {
-		for _, ip := range endpoint.Addresses {
+	for _, port := range subset.Ports {
+		portString := ":" + strconv.Itoa(int(port.Port))
+		for _, ip := range subset.Addresses {
 			entryPrefix := "bucket=weight=100,ct(nat(dst="
-			entry = entry + entryPrefix + ip.IP + "),commit,table=2),"
+			entry = entry + entryPrefix + ip.IP + portString + "),commit,table=2),"
 		}
 	}
+
 	ct = CtPrefix + entry[:len(entry)-1]
 	return ct
 }
 
 func addOvsSvc(service K8ssvc) {
-	// add a new Service Group to OVS
-	ctString := constructCtEntries(service)
-	cmdexecutor(exec.Command("ovs-ofctl", "-O", "OpenFlow13", "add-group", "br0", ctString), true)
-	for _, port := range service.Ports {
-		var protocol string
-		if port.Protocol == "TCP" {
-			protocol = ",ip_proto=6,tcp_dst=" + strconv.Itoa(int(port.Port))
-		}
-		if port.Protocol == "UDP" {
-			protocol = ",ip_proto=17,udp_dst=" + strconv.Itoa(int(port.Port))
-		}
+	if len(service.Endpoints) == 0 {
+		var subset api.EndpointSubset
+		ctString := constructCtEntries(service, subset)
+		cmdexecutor(exec.Command("ovs-ofctl", "-O", "OpenFlow13", "add-group", "br0", ctString), true)
 		cmdexecutor(exec.Command("ovs-ofctl", "-O", "OpenFlow13", "add-flow", "br0",
-			"table=1,priority=100,ip,nw_dst="+service.ClusterIP+protocol+
-				",actions=mod_tp_dst:"+strconv.Itoa(int(port.Port))+",group:"+
-				strconv.Itoa(int(service.OvsGroup))), true)
+			"table=1,priority=100,ip,nw_dst="+service.ClusterIP+",actions=group:"+strconv.Itoa(int(service.OvsGroup))), true)
+	} else {
+		for _, subset := range service.Endpoints {
+			ctString := constructCtEntries(service, subset)
+			cmdexecutor(exec.Command("ovs-ofctl", "-O", "OpenFlow13", "add-group", "br0", ctString), true)
+			for _, port := range service.Ports {
+				var protocol string
+				if port.Protocol == "TCP" {
+					protocol = ",ip_proto=6,tcp_dst=" + strconv.Itoa(int(port.Port))
+				}
+				if port.Protocol == "UDP" {
+					protocol = ",ip_proto=17,udp_dst=" + strconv.Itoa(int(port.Port))
+				}
+				cmdexecutor(exec.Command("ovs-ofctl", "-O", "OpenFlow13", "add-flow", "br0",
+					"table=1,priority=100,ip,nw_dst="+service.ClusterIP+protocol+
+						",actions=mod_tp_dst:"+strconv.Itoa(int(port.Port))+",group:"+
+						strconv.Itoa(int(service.OvsGroup))), true)
+			}
+		}
 	}
 }
 
@@ -344,29 +355,33 @@ func main() {
 	for {
 		select {
 		case endpointsWatch := <-watchEndpointChan:
-			Info.Printf("receive on channel is %s, type %s %T \n", endpointsWatch, endpointsWatch.Type, endpointsWatch.Type)
-			Info.Printf("Received Endpoints Details: \n%s\n", formatK8endpointJson(endpointsWatch.Object.(*api.Endpoints)))
-			switch endpointsWatch.Type {
-			case "ADDED":
-				addEndpoints(client, endpointsWatch.Object, &svcs)
-			case "DELETED":
-				delEndpoints(client, endpointsWatch.Object, &svcs)
-			case "MODIFIED":
-				modEndpoints(client, endpointsWatch.Object, &svcs)
+			if endpointsWatch.Type != "" {
+				Info.Printf("receive on channel is %s, type %s %T \n", endpointsWatch, endpointsWatch.Type, endpointsWatch.Type)
+				Info.Printf("Received Endpoints Details: \n%s\n", formatK8endpointJson(endpointsWatch.Object.(*api.Endpoints)))
+				switch endpointsWatch.Type {
+				case "ADDED":
+					addEndpoints(client, endpointsWatch.Object, &svcs)
+				case "DELETED":
+					delEndpoints(client, endpointsWatch.Object, &svcs)
+				case "MODIFIED":
+					modEndpoints(client, endpointsWatch.Object, &svcs)
+				}
 			}
 		case serviceWatch := <-watchSvcChan:
-			Info.Printf("receive on channel is %s, type %s %T \n", serviceWatch, serviceWatch.Type, serviceWatch.Type)
-			Info.Printf("Received Service Details: \n%s\n", formatK8svcJson(serviceWatch.Object.(*api.Service)))
-			switch serviceWatch.Type {
-			case "ADDED":
-				time.Sleep(500 * time.Millisecond)
-				addSvc(client, serviceWatch.Object, &svcs)
-			case "DELETED":
-				time.Sleep(500 * time.Millisecond)
-				delSvc(client, serviceWatch.Object, &svcs)
-			case "MODIFIED":
-				time.Sleep(500 * time.Millisecond)
-				delSvc(client, serviceWatch.Object, &svcs)
+			if serviceWatch.Type != "" {
+				Info.Printf("receive on channel is %s, type %s %T \n", serviceWatch, serviceWatch.Type, serviceWatch.Type)
+				Info.Printf("Received Service Details: \n%s\n", formatK8svcJson(serviceWatch.Object.(*api.Service)))
+				switch serviceWatch.Type {
+				case "ADDED":
+					time.Sleep(500 * time.Millisecond)
+					addSvc(client, serviceWatch.Object, &svcs)
+				case "DELETED":
+					time.Sleep(500 * time.Millisecond)
+					delSvc(client, serviceWatch.Object, &svcs)
+				case "MODIFIED":
+					time.Sleep(500 * time.Millisecond)
+					delSvc(client, serviceWatch.Object, &svcs)
+				}
 			}
 		}
 	}
